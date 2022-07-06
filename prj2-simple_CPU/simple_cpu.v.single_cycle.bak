@@ -1,0 +1,218 @@
+`timescale 10ns / 1ns
+//`include "sources/reg_file/reg_file.v"
+//`include "sources/alu/alu.v"
+//`include "sources/shifter/shifter.v"
+module simple_cpu(
+	input             clk,
+	input             rst,
+
+	output [31:0]     PC,
+	input  [31:0]     Instruction,
+
+	output [31:0]     Address,
+	output            MemWrite,
+	output [31:0]     Write_data,
+	output [ 3:0]     Write_strb,
+
+	input  [31:0]     Read_data,
+	output            MemRead
+);
+
+	// THESE THREE SIGNALS ARE USED IN OUR TESTBENCH
+	// PLEASE DO NOT MODIFY SIGNAL NAMES
+	// AND PLEASE USE THEM TO CONNECT PORTS
+	// OF YOUR INSTANTIATION OF THE REGISTER FILE MODULE
+	wire			RF_wen;
+	wire [4:0]		RF_waddr;
+	wire [31:0]		RF_wdata;
+
+	// TODO: PLEASE ADD YOUR CODE BELOW
+	wire RegDst,Branch,MemtoReg,ALUEn,ShiftEn,ALUSrc,ShiftSrc;
+	
+
+	//IF
+
+	//PC
+	reg  [31:0] PC;
+	wire [31:0] PC_new;
+	wire [31:0] PC_normal;
+	wire [31:0] PC_abnormal;
+	assign PC_normal = PC + 4;
+	assign PC_new = ((Zero ^ (
+			REGIMM & ~Instruction[16] 
+			| I_Type_b & (opcode[0] ^ (opcode[1] & |RF_rdata1))
+		)) & Branch) ? PC_abnormal : PC_normal;
+	always @(posedge clk) begin
+		if(rst) begin
+			PC <= 32'd0;
+		end else begin
+			PC <= R_Type_jump ? RF_rdata1 : J_Type ? {Instruction[25:0], 2'b00} : PC_new;
+		end
+	end
+
+
+	//ID
+
+	//Registers
+	wire [31:0] RF_rdata1;
+	wire [31:0] RF_rdata2;
+	reg_file Registers(
+		.clk	(clk),
+		.waddr	(RF_waddr),
+		.raddr1	(Instruction[25:21]),
+		.raddr2	(Instruction[20:16]),
+		.wen	(RF_wen),
+		.wdata	(RF_wdata),
+		.rdata1	(RF_rdata1),
+		.rdata2	(RF_rdata2)
+	);
+	assign RF_waddr = RegDst ? Instruction[15:11] : 
+		{(5){~REGIMM}} & ({(5){J_Type}} | Instruction[20:16]);
+	
+	//Sign extend
+	wire [31:0] SignExtend;
+	assign SignExtend = {{(16){Instruction[15]}}, Instruction[15:0]};
+	//Zero extend for I-Type andi, ori, xori
+	wire [31:0] ZeroExtend;
+	assign ZeroExtend = {16'b0, Instruction[15:0]};
+	//Select
+	wire [31:0] ExtendedImm;
+	assign ExtendedImm = opcode[5:2] == 4'b0011 ? ZeroExtend : SignExtend;
+	
+	//Control
+	wire [5:0] opcode;
+	wire [5:0] func;
+	assign opcode = Instruction[31:26];
+	assign func	= Instruction[5:0];
+
+	wire R_Type;
+	wire REGIMM;
+	wire J_Type;
+	wire I_Type_b;
+	wire I_Type_calc;
+	wire I_Type_mr;
+	wire I_Type_mw;
+	assign R_Type		= opcode[5:0] == 6'b000000;
+	assign R_Type_calc	= R_Type & func[5];
+	assign R_Type_shift	= R_Type & (func[5:3]==3'b000);
+	assign R_Type_jump	= R_Type & ({func[5:3],func[1]}==4'b0010);
+	assign R_Type_mov	= R_Type & ({func[5:3],func[1]}==4'b0011);
+	assign REGIMM 		= opcode[5:0] == 6'b000001;
+	assign J_Type 		= opcode[5:1] == 5'b00001;
+	assign I_Type_b 	= opcode[5:2] == 4'b0001;
+	assign I_Type_calc 	= opcode[5:3] == 3'b001;
+	assign I_Type_mr	= opcode[5:3] == 3'b100;
+	assign I_Type_mw	= opcode[5:3] == 3'b101;
+
+	assign RegDst 	= R_Type;
+	assign Branch 	= REGIMM | I_Type_b;
+	assign MemRead	= I_Type_mr;
+	assign MemtoReg	= I_Type_mr;
+	assign ALUEn	= R_Type_calc | REGIMM | I_Type_b | I_Type_calc | I_Type_mr | I_Type_mw;
+	assign ShiftEn	= R_Type_shift;
+	assign MemWrite = I_Type_mw;
+	assign ALUSrc	= I_Type_calc | I_Type_mr | I_Type_mw;
+	assign ShiftSrc = func[2];
+	assign RF_wen	= R_Type & (~R_Type_mov | (func[0]^~|RF_rdata2))
+							 & (~R_Type_jump | func[0]) // jalr allowed, jr not
+							 /* must add the line above 
+							  * since the benchmark judges RF_wen==1 (when jr) to be wrong
+							  * even if RF_waddr==0
+							  * when the RF naturally prevent data from writing in
+							  */
+					| J_Type & opcode[0]
+					| I_Type_calc
+					| I_Type_mr;
+
+
+	//EX
+	
+	wire [2:0] ALUop;
+	wire Overflow,CarryOut,Zero;
+	wire [31:0] Result,ALUResult,ShifterResult;
+	wire [1:0] Shiftop;
+	
+	//ALU
+	alu ALU(
+		.A			(RF_rdata1),
+		.B			(ALUSrc ? ExtendedImm : REGIMM ? 32'b0 :RF_rdata2),
+		.ALUop		(ALUop),
+		.Overflow	(Overflow),
+		.CarryOut	(CarryOut),
+		.Zero		(Zero),
+		.Result		(ALUResult)
+	);
+	assign ALUop = {(3){R_Type_calc | R_Type_jump}} & {
+		func[1] & ~(func[3] & func[0]),
+		~func[2],
+		func[3] & ~func[2] & func[1] | func[2] & func[0]
+	} | {(3){I_Type_calc}} & {
+		opcode[1] & ~(opcode[3] & opcode[0]),
+		~opcode[2],
+		opcode[3] & ~opcode[2] & opcode[1] | opcode[2] & opcode[0]
+	} | {(3){REGIMM}}
+	  | {(3){I_Type_b}}	 & {2'b11, opcode[1]}	// slt 111 sub 110
+	  | {(3){I_Type_mr | I_Type_mw}} & 3'b010;
+	
+	//Shifter
+	shifter Shifter(
+		.A			(RF_rdata2),
+		.B			(ShiftSrc ? RF_rdata1[4:0] : Instruction[10:6]),
+		.Shiftop	(Shiftop),
+		.Result		(ShifterResult)
+	);
+	assign Shiftop = func[1:0];
+	
+	//Result
+	assign Result = {(32){ALUEn}} & ALUResult
+				  | {(32){ShiftEn}} & ShifterResult;
+	
+	//PC Adder
+	wire [31:0] PC_offset;
+	assign PC_offset 	= {SignExtend[29:0], 2'b00};
+	assign PC_abnormal 	= PC_normal + PC_offset;
+
+
+	//MEM
+	
+	//Data Memory
+	assign Address 		= Result & ~32'b11;
+	assign Write_data	= opcode[2:0] == 3'b010 ? RF_rdata2 >> {~Result[1:0], 3'b0} : RF_rdata2 << {Result[1:0], 3'b0};
+	assign Write_strb	= 	{(4){~opcode[2] & opcode[1] & ~opcode[0]}} & {	// swl
+ 								Result[1] & Result[0], Result[1], Result[1] | Result[0], 1'b1
+						  	}
+						|	{(4){ opcode[2] & opcode[1] & ~opcode[0]}} & {	// swr
+ 								1'b1, ~(Result[1]&Result[0]), ~Result[1], ~(Result[1]|Result[0])
+						  	}
+						|  	{(4){~opcode[1] | opcode[0]}} & {
+								( Result[1] | opcode[1]) & ( Result[0] | opcode[0]),
+						   	 	( Result[1] | opcode[1]) & (~Result[0] | opcode[0]),
+						   	 	(~Result[1] | opcode[1]) & ( Result[0] | opcode[0]),
+						     	(~Result[1] | opcode[1]) & (~Result[0] | opcode[0]) 
+							};
+
+
+	//WB
+
+	wire [31:0] Read_data_shifted;
+	wire [31:0] Read_data_masked;
+	wire Read_data_sign_bit;
+	wire [31:0] Read_data_unaligned;
+	assign Read_data_shifted 	= Read_data >> {Result[1:0], 3'b0};
+	assign Read_data_masked 	= Read_data_shifted & {{(16){opcode[1]}}, {(8){opcode[0]}}, {(8){1'b1}}}
+								| {(32){~opcode[2] & Read_data_sign_bit}} & ~{{(16){opcode[1]}}, {(8){opcode[0]}}, {(8){1'b1}}};
+	assign Read_data_sign_bit 	= Read_data_shifted[opcode[1:0]==2'b01 ? 15 : 7];
+	assign Read_data_unaligned 	= {(32){~opcode[2]}} & (
+									(Read_data << {~Result[1:0], 3'b0}) | RF_rdata2 & ({(32){1'b1}} >> { Result[1:0], 3'b0})
+								)|{(32){opcode[2]}} & (
+									(Read_data >> { Result[1:0], 3'b0}) | RF_rdata2 & ({(32){1'b1}} << {~Result[1:0], 3'b0})
+								);
+	assign RF_wdata = {(32){MemtoReg & (~opcode[1] |  opcode[0])}} & Read_data_masked
+					| {(32){MemtoReg & ( opcode[1] & ~opcode[0])}} & Read_data_unaligned
+					| {(32){R_Type_mov}} & RF_rdata1 
+					| {(32){R_Type_jump | J_Type}} & PC + 8
+					| {(32){I_Type_calc & (&opcode[3:0])}} & {Instruction[15:0], 16'd0}
+					| {(32){R_Type_calc | R_Type_shift | I_Type_calc & ~&opcode[3:0]}} & Result;
+
+
+endmodule

@@ -1,0 +1,89 @@
+`timescale 10 ns / 1 ns
+
+`define DATA_WIDTH 32
+
+module alu(
+	input  [`DATA_WIDTH - 1:0]  A,
+	input  [`DATA_WIDTH - 1:0]  B,
+	input  [              2:0]  ALUop,
+	output                      Overflow,
+	output                      CarryOut,
+	output                      Zero,
+	output [`DATA_WIDTH - 1:0]  Result
+);
+	// TODO: Please add your logic design here
+    
+    wire CarryOuts [`DATA_WIDTH - 1:0];
+    wire Set;
+
+    one_bit_alu alu_inst_first(
+        .a          (A[0]),
+        .b          (B[0]),
+        .Less       (Set^Overflow),
+        .Binvert    (ALUop[2]),
+        .CarryIn    (ALUop[2]),
+        .Operation  (ALUop[1:0]),
+        .CarryOut   (CarryOuts[0]),
+        .Result     (Result[0]),
+        .Set        ()
+    );
+
+    genvar i;
+    generate
+        for(i=1; i<`DATA_WIDTH-1; i=i+1) begin
+            one_bit_alu alu_inst(
+                .a          (A[i]),
+                .b          (B[i]),
+                .Less       (1'b0),
+                .Binvert    (ALUop[2]),
+                .CarryIn    (CarryOuts[i-1]),
+                .Operation  (ALUop[1:0]),
+                .CarryOut   (CarryOuts[i]),
+                .Result     (Result[i]),
+                .Set        ()
+            );
+        end
+    endgenerate
+
+    one_bit_alu alu_inst_last(
+        .a          (A[`DATA_WIDTH-1]),
+        .b          (B[`DATA_WIDTH-1]),
+        .Less       (1'b0),
+        .Binvert    (ALUop[2]),
+        .CarryIn    (CarryOuts[`DATA_WIDTH-2]),
+        .Operation  (ALUop[1:0]),
+        .CarryOut   (CarryOuts[`DATA_WIDTH-1]),
+        .Result     (Result[`DATA_WIDTH-1]),
+        .Set        (Set)
+    );
+
+    assign CarryOut = CarryOuts[`DATA_WIDTH - 1]^ALUop[2];
+    assign Overflow = CarryOuts[`DATA_WIDTH - 1]^CarryOuts[`DATA_WIDTH - 2];
+    assign Zero = ~|Result;// (Result==`DATA_WIDTH'b0)?1:0;
+
+endmodule
+
+module one_bit_alu(
+    input a,
+    input b,
+    input Less,
+    input Binvert,
+    input CarryIn,
+    input [1:0] Operation,
+    output CarryOut,
+    output Result,
+    output Set
+);
+    wire bnew;
+    wire Results [3:0] ;
+
+    assign bnew = Binvert^b;
+    assign Results[0] = a&bnew;
+    assign Results[1] = a|bnew;
+    assign Results[2] = a^bnew^CarryIn;
+    assign Results[3] = Less;
+    assign CarryOut = Results[0]|CarryIn&Results[1];
+    assign Result = Results[Operation];
+    assign Set = Results[2];
+
+endmodule
